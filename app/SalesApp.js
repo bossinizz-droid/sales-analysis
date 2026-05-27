@@ -87,43 +87,97 @@ function LoginModal({ onClose }) {
   )
 }
 
+/* ─── 클라이언트에서 엑셀 파싱 (관리자 즉시 미리보기용) ─── */
+async function parseFileClient(file) {
+  const XLSX = (await import('xlsx')).default || await import('xlsx')
+  const buf = await file.arrayBuffer()
+  const wb = XLSX.read(buf, {type:'array'})
+  const ws = wb.Sheets[wb.SheetNames[0]]
+  const rows = XLSX.utils.sheet_to_json(ws, {defval:''})
+  if (!rows.length) throw new Error('empty')
+  const columns = Object.keys(rows[0])
+  const skipKeywords = ['년월','연월','회계연월','회계일','기표일','기표번호','전표번호','사업자번호','금액','차변','대변','잔액']
+  const candidates = columns
+    .filter(col => !skipKeywords.some(k=>col.includes(k)))
+    .map(col => {const u=new Set(rows.map(r=>String(r[col]||'').trim()).filter(Boolean)).size; return {col,u}})
+    .sort((a,b)=>a.u-b.u).slice(0,5).map(c=>c.col)
+  const allGroupData = {}
+  candidates.forEach(col => { allGroupData[col] = parseRowsByCol(rows, col) })
+  return { allGroupData, meta: { fileName:file.name, uploadedAt:new Date().toISOString(), columns, candidates, defaultCol:candidates[0]||columns[0], totalRows:rows.length } }
+}
+
+function parseRowsByCol(rows, groupCol) {
+  const data = {}
+  rows.forEach(r => {
+    const ymRaw = String(r['년월']||r['연월']||r['회계연월']||'').replace(/[^0-9]/g,'')
+    const ym = ymRaw.length>=6?ymRaw.slice(0,6):ymRaw.length===4?ymRaw+'01':''
+    if (!ym) return
+    const group = String(r[groupCol]||'(미지정)').trim()||'(미지정)'
+    const debit  = parseFloat(String(r['차변금액']||r['차변']||0).replace(/[^0-9.-]/g,''))||0
+    const credit = parseFloat(String(r['대변금액']||r['대변']||0).replace(/[^0-9.-]/g,''))||0
+    const acctCode = String(r['계정코드']||''), acctName = String(r['계정명']||'')
+    if (!data[ym]) data[ym]={}
+    if (!data[ym][group]) data[ym][group]={sales:0,purchase:0,count:0,items:[]}
+    if (acctCode.startsWith('4')||acctName.includes('매출')||acctName.includes('수익')) {
+      data[ym][group].sales += credit||debit
+    } else { data[ym][group].purchase += debit }
+    data[ym][group].count++
+    if (data[ym][group].items.length<5) data[ym][group].items.push({
+      적요:String(r['적요']||''), 거래처:String(r['거래처']||''),
+      회계일:String(r['회계일']||r['기표일']||''), 차변금액:debit, 대변금액:credit,
+    })
+  })
+  return data
+}
+
+function applyData(allGroupData, meta, setAllData, setMeta, setGroupCol, setActiveMonth) {
+  setAllData(allGroupData)
+  setMeta(meta)
+  const firstCol = meta.candidates?.[0] || meta.defaultCol
+  setGroupCol(firstCol)
+  const ms = Object.keys(allGroupData[firstCol]||{}).sort()
+  setActiveMonth(ms[ms.length-1]||null)
+}
+
 /* ════════════════════════════════
    메인 앱
 ════════════════════════════════ */
 export default function SalesApp() {
-  const [role, setRole]           = useState(null)   // null|'guest'|'admin'
-  const [showLogin, setShowLogin] = useState(false)
-  const [allData, setAllData]     = useState(null)   // { [groupCol]: { [ym]: { [type]: {...} } } }
-  const [meta, setMeta]           = useState(null)
-  const [groupCol, setGroupCol]   = useState(null)
+  const [role, setRole]               = useState(null)   // null|'guest'|'admin'
+  const [initDone, setInitDone]       = useState(false)  // 초기 로딩 완료
+  const [showLogin, setShowLogin]     = useState(false)
+  const [allData, setAllData]         = useState(null)
+  const [meta, setMeta]               = useState(null)
+  const [groupCol, setGroupCol]       = useState(null)
   const [activeMonth, setActiveMonth] = useState(null)
-  const [viewCol, setViewCol]     = useState('sales')
-  const [drawer, setDrawer]       = useState(null)
-  const [uploading, setUploading] = useState(false)
-  const [uploadMsg, setUploadMsg] = useState('')
-  const [dragging, setDragging]   = useState(false)
+  const [viewCol, setViewCol]         = useState('sales')
+  const [drawer, setDrawer]           = useState(null)
+  const [uploading, setUploading]     = useState(false)
+  const [uploadStatus, setUploadStatus] = useState('idle') // 'idle'|'uploading'|'done'|'error'
+  const [uploadMsg, setUploadMsg]     = useState('')
+  const [dragging, setDragging]       = useState(false)
+  const [noDataAlert, setNoDataAlert] = useState(false)
   const fileInputRef = useRef()
 
-  /* ── 초기: role 확인 + 저장된 데이터 로드 ── */
+  /* ── 초기: role 확인 + 서버 데이터 로드 ── */
   useEffect(() => {
-    fetch('/api/auth').then(r=>r.json()).then(j=>setRole(j.role||'guest'))
-    loadData()
-  }, [])
-
-  const loadData = async () => {
-    try {
-      const res = await fetch('/api/data')
-      const json = await res.json()
-      if (json.ok) {
-        setAllData(json.data)
-        setMeta(json.meta)
-        const firstCol = json.meta.candidates?.[0] || json.meta.defaultCol
-        setGroupCol(firstCol)
-        const months = Object.keys(json.data[firstCol]||{}).sort()
-        setActiveMonth(months[months.length-1]||null)
+    const init = async () => {
+      const [authRes, dataRes] = await Promise.all([
+        fetch('/api/auth').then(r=>r.json()).catch(()=>({role:'guest'})),
+        fetch('/api/data').then(r=>r.json()).catch(()=>({ok:false})),
+      ])
+      const userRole = authRes.role || 'guest'
+      setRole(userRole)
+      if (dataRes.ok) {
+        applyData(dataRes.data, dataRes.meta, setAllData, setMeta, setGroupCol, setActiveMonth)
+      } else {
+        // 데이터 없음 → 알림
+        setNoDataAlert(true)
       }
-    } catch {}
-  }
+      setInitDone(true)
+    }
+    init()
+  }, [])
 
   /* ── 로그인/로그아웃 ── */
   const handleLoginClose = (success) => {
@@ -135,26 +189,27 @@ export default function SalesApp() {
     setRole('guest')
   }
 
-  /* ── 파일 업로드 ── */
+  /* ── 파일 업로드: 클라이언트 파싱으로 즉시 표시 + 백그라운드 서버 저장 ── */
   const handleFile = useCallback(async (file) => {
     if (!file || role!=='admin') return
-    setUploading(true); setUploadMsg('')
+    setUploadStatus('uploading'); setUploadMsg(''); setNoDataAlert(false)
     try {
-      const fd = new FormData()
-      fd.append('file', file)
-      const res = await fetch('/api/upload', {method:'POST', body:fd})
-      const json = await res.json()
-      if (json.ok) {
-        setUploadMsg(`✓ ${json.meta.fileName} 업로드 완료 (${json.meta.totalRows.toLocaleString()}건)`)
-        await loadData()
-      } else {
-        setUploadMsg(`✗ ${json.message||'업로드 실패'}`)
-      }
-    } catch { setUploadMsg('✗ 네트워크 오류') }
-    setUploading(false)
+      // 1) 클라이언트 파싱 → 즉시 화면 표시
+      const {allGroupData, meta: newMeta} = await parseFileClient(file)
+      applyData(allGroupData, newMeta, setAllData, setMeta, setGroupCol, setActiveMonth)
+      setUploadStatus('done')
+      setUploadMsg(`${newMeta.fileName} · ${newMeta.totalRows.toLocaleString()}건 로드 완료`)
+
+      // 2) 백그라운드로 서버에도 저장
+      const fd = new FormData(); fd.append('file', file)
+      fetch('/api/upload', {method:'POST', body:fd}).catch(()=>{})
+    } catch (e) {
+      setUploadStatus('error')
+      setUploadMsg('파일을 읽을 수 없습니다. 형식을 확인해 주세요.')
+    }
   }, [role])
 
-  const onFileChange = (e) => handleFile(e.target.files[0])
+  const onFileChange = (e) => { handleFile(e.target.files[0]); e.target.value='' }
   const onDrop = (e) => { e.preventDefault(); setDragging(false); handleFile(e.dataTransfer.files[0]) }
 
   /* ── 집계기준 변경 ── */
@@ -181,6 +236,15 @@ export default function SalesApp() {
 
   const getVal = (obj, col) => col==='chg' ? obj?.profit : obj?.[col] ?? 0
 
+  if (!initDone) return (
+    <div className={styles.app}>
+      <div className={styles.initLoader}>
+        <div className={styles.spinner}/>
+        <p>데이터 불러오는 중...</p>
+      </div>
+    </div>
+  )
+
   return (
     <div className={styles.app}>
 
@@ -189,7 +253,9 @@ export default function SalesApp() {
         <div>
           <h1 className={styles.hdrTitle}>매출매입 분석</h1>
           <p className={styles.hdrSub}>
-            {meta ? `${meta.fileName} · ${new Date(meta.uploadedAt).toLocaleDateString('ko')} 업로드` : '데이터를 불러오는 중...'}
+            {meta
+              ? `${meta.fileName} · ${new Date(meta.uploadedAt).toLocaleDateString('ko')} 업로드`
+              : role==='admin' ? '엑셀을 업로드해 주세요' : '데이터 없음'}
           </p>
         </div>
         {role==='admin' ? (
@@ -213,38 +279,56 @@ export default function SalesApp() {
       {role==='admin' && (
         <div className={styles.uploadWrap}>
           <div
-            className={`${styles.uploadZone} ${dragging?styles.uploadDrag:''}`}
+            className={`${styles.uploadZone} ${dragging?styles.uploadDrag:''} ${uploadStatus==='done'?styles.uploadDone:''} ${uploadStatus==='error'?styles.uploadError:''}`}
             onDragOver={(e)=>{e.preventDefault();setDragging(true)}}
             onDragLeave={()=>setDragging(false)}
             onDrop={onDrop}
             onClick={()=>fileInputRef.current?.click()}
           >
             <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" onChange={onFileChange} style={{display:'none'}}/>
-            {uploading ? (
-              <><div className={styles.spinner}/><p style={{color:'#1a6ef5',fontWeight:500}}>업로드 중...</p></>
-            ) : uploadMsg ? (
-              <><p style={{color:uploadMsg.startsWith('✓')?'#1a8a4a':'#c0392b',fontWeight:500,fontSize:13}}>{uploadMsg}</p><span>탭하여 새 파일 업로드</span></>
+            {uploadStatus==='uploading' ? (
+              <><div className={styles.spinner}/><p style={{color:'#1a6ef5',fontWeight:500}}>파일 분석 중...</p><span>잠시만 기다려 주세요</span></>
+            ) : uploadStatus==='done' ? (
+              <>
+                <svg viewBox="0 0 24 24" fill="none" stroke="#1a8a4a" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{width:28,height:28,marginBottom:6}}><polyline points="20 6 9 17 4 12"/></svg>
+                <p style={{color:'#1a8a4a',fontWeight:600}}>{uploadMsg}</p>
+                <span>탭하여 새 파일로 교체</span>
+              </>
+            ) : uploadStatus==='error' ? (
+              <>
+                <svg viewBox="0 0 24 24" fill="none" stroke="#c0392b" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{width:28,height:28,marginBottom:6}}><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                <p style={{color:'#c0392b',fontWeight:500}}>{uploadMsg}</p>
+                <span>탭하여 다시 시도</span>
+              </>
             ) : (
               <>
                 <svg viewBox="0 0 24 24" fill="none" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{width:32,height:32,marginBottom:8,stroke:'#9ea3b0'}}>
                   <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
                 </svg>
-                <p>엑셀 파일 업로드</p>
-                <span>관리자 전용 · xlsx · xls · csv</span>
+                <p>계정별원장 엑셀 업로드</p>
+                <span>xlsx · xls · csv · 드래그 또는 탭</span>
               </>
             )}
           </div>
         </div>
       )}
 
-      {/* ── 데이터 없을 때 안내 ── */}
-      {!allData && role!==null && (
-        <div className={styles.noData}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="#9ea3b0" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{width:48,height:48,marginBottom:12}}>
-            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
+      {/* ── 데이터 없음 알림 ── */}
+      {noDataAlert && !allData && (
+        <div className={styles.noDataAlert}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{width:22,height:22,flexShrink:0}}>
+            <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
           </svg>
-          <p>업로드된 데이터가 없습니다</p>
-          {role!=='admin' && <span>관리자가 데이터를 업로드하면 여기서 확인할 수 있습니다</span>}
+          <div>
+            <p className={styles.noDataAlertTitle}>업로드된 데이터가 없습니다</p>
+            {role==='admin'
+              ? <p className={styles.noDataAlertSub}>위 업로드 영역에 엑셀 파일을 올려주세요.</p>
+              : <p className={styles.noDataAlertSub}>관리자가 로그인하여 엑셀을 업로드하면 여기서 조회할 수 있습니다.</p>
+            }
+          </div>
+          {role!=='admin' && (
+            <button className={styles.noDataLoginBtn} onClick={()=>setShowLogin(true)}>관리자 로그인</button>
+          )}
         </div>
       )}
 

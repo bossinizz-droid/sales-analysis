@@ -267,3 +267,34 @@
 }
 .noData p    { font-size: 15px; font-weight: 500; color: #5c6070; margin-bottom: 6px; }
 .noData span { font-size: 12px; color: #9ea3b0; line-height: 1.6; }
+
+/* ─── 초기 로딩 ─── */
+.initLoader {
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; height: 100vh; gap: 14px;
+}
+.initLoader p { font-size: 13px; color: #9ea3b0; }
+
+/* ─── 업로드 에러 상태 ─── */
+.uploadError { border-color: #fca5a5 !important; background: #fff5f5; }
+
+/* ─── 데이터 없음 알림 배너 ─── */
+.noDataAlert {
+  margin: 12px 12px 0;
+  background: #fff;
+  border: 1.5px solid #fde68a;
+  border-radius: 14px;
+  padding: 14px 14px;
+  display: flex; align-items: flex-start; gap: 10px;
+  color: #92400e;
+}
+.noDataAlert svg { margin-top: 1px; stroke: #d97706; }
+.noDataAlertTitle { font-size: 13px; font-weight: 700; color: #92400e; margin-bottom: 3px; }
+.noDataAlertSub   { font-size: 12px; color: #b45309; line-height: 1.5; }
+.noDataLoginBtn {
+  margin-left: auto; flex-shrink: 0;
+  font-size: 11px; font-weight: 700; color: #1a6ef5;
+  background: #e8f0fe; border: none; border-radius: 8px;
+  padding: 6px 11px; cursor: pointer; font-family: inherit;
+  white-space: nowrap; align-self: center;
+}
