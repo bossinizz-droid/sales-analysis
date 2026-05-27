@@ -1,7 +1,3 @@
 /** @type {import('next').NextConfig} */
-const nextConfig = {
-  experimental: {
-    serverComponentsExternalPackages: ['xlsx']
-  }
-}
+const nextConfig = {}
 module.exports = nextConfig
