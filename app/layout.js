@@ -1,3 +1,5 @@
+import './globals.css'
+
 export const metadata = {
   title: '매출매입 분석',
   description: '계정별원장 엑셀 업로드 → 유형별 매출·매입·손익 자동 집계',
